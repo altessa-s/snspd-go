@@ -1,0 +1,84 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.cc }} / Go ${{ matrix.go }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep the minimum supported GCC and a second compiler generation.
+          - { os: ubuntu-latest, cc: gcc-13, go: '1.24.x' }
+          - { os: ubuntu-latest, cc: gcc-13, go: stable }
+          - { os: ubuntu-latest, cc: gcc-14, go: stable }
+          # Install clang explicitly so the runner default does not determine C23 support.
+          - { os: ubuntu-24.04, cc: clang-19, go: stable }
+          - { os: macos-latest, cc: clang, go: stable }
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install clang 19
+        if: matrix.cc == 'clang-19'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang-19 libclang-rt-19-dev
+
+      - name: Name the compiler
+        run: |
+          echo "CC=${{ matrix.cc }}" >> "$GITHUB_ENV"
+          ${{ matrix.cc }} --version | head -1
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Prepare temporary directory
+        run: |
+          mkdir -p build/tmp
+          echo "TMPDIR=$PWD/build/tmp" >> "$GITHUB_ENV"
+
+      - name: Test vendoring transaction
+        run: python3 scripts/test-update-clib.py
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      - name: Test with full cgo pointer checks
+        run: GOEXPERIMENT=cgocheck2 go test -count=1 ./...
+
+      - name: Check C symbol isolation
+        run: python3 scripts/check-symbols.py
+
+      - name: Fuzz briefly
+        run: go test -run='^$' -fuzz=FuzzOpen -fuzztime=20s .
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version: stable
+      - name: Name the compiler
+        run: echo "CC=gcc-14" >> "$GITHUB_ENV"
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.15
